@@ -1,4 +1,6 @@
+# ============================================================
 # Python
+# ============================================================
 __pycache__/
 *.pyc
 *.pyo
@@ -7,34 +9,112 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.so
+*.egg
+.eggs/
+MANIFEST
 
-# Virtual envs
+# ============================================================
+# Virtual environments
+# ============================================================
 .venv/
 venv/
 env/
+.env/
 
-# Data & caches (large binary artifacts — store outside the repo)
+# ============================================================
+# Data, caches, and large binary artifacts
+# These are too big for git — store them outside the repo or
+# use DVC / cloud storage.
+# ============================================================
 data/
 cache/
 *.h5
+*.hdf5
 vocab.json
 
-# Model checkpoints
+# ============================================================
+# Model weights and checkpoints
+# ============================================================
 checkpoints/
+outputs/
 *.pt
 *.pth
+*.ckpt
+*.bin
+*.safetensors
 
+# ============================================================
+# Docker
+# ============================================================
+# Keep docker-compose.yml and Dockerfile tracked.
+# Ignore local override files and generated volumes.
+docker-compose.override.yml
+docker-compose.local.yml
+.docker/
+
+# ============================================================
+# Frontend build output
+# ============================================================
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ============================================================
+# Logs
+# ============================================================
+*.log
+logs/
+lightning_logs/
+wandb/
+mlruns/
+runs/
+tb_logs/
+
+# ============================================================
+# Environment variable files
+# ============================================================
+.env
+.env.*
+!.env.example
+
+# ============================================================
 # Jupyter
+# ============================================================
 .ipynb_checkpoints/
 *.ipynb
 
-# Env overrides
-.env
+# ============================================================
+# Testing and coverage
+# ============================================================
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
 
-# OS
+# ============================================================
+# Type checkers and linters
+# ============================================================
+.mypy_cache/
+.ruff_cache/
+
+# ============================================================
+# OS artifacts
+# ============================================================
 .DS_Store
+.DS_Store?
 Thumbs.db
+desktop.ini
 
-# IDE
+# ============================================================
+# IDE and editor settings
+# Keeping .vscode/ ignored by default — if your team agrees
+# on shared settings, commit .vscode/settings.json explicitly
+# and remove the line below.
+# ============================================================
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
