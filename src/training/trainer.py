@@ -92,10 +92,6 @@ class CaptioningModule(pl.LightningModule):
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
-    # ------------------------------------------------------------------
-    # validation
-    # ------------------------------------------------------------------
-
     def validation_step(self, batch: tuple, batch_idx: int) -> None:
         images, token_ids = batch
 

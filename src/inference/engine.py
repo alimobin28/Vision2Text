@@ -277,5 +277,7 @@ class InferenceEngine:
                 if t not in (self.bos_id, self.pad_id, 0)
             ]
 
-        completed.sort(key=lambda x: x[0], reverse=True)
+        # Length-normalize scores so short captions don't win by default.
+        # Alpha=0.7 is the standard value from Wu et al. (Google NMT paper).
+        completed.sort(key=lambda x: x[0] / (len(x[1]) ** 0.7), reverse=True)
         return completed[0][1]

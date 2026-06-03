@@ -17,7 +17,8 @@ from src.data.dataset import FlickrDataset, get_dataloader
 from src.data.preprocessing import clean_caption
 from src.data.vocab import build_vocab, load_vocab
 from src.training.trainer import CaptioningModule, build_trainer
-""""""
+
+
 def _collect_train_captions() -> list[str]:
     """Read every training caption so we can build the BPE vocabulary from them.
     """

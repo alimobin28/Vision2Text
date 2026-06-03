@@ -37,7 +37,6 @@ def _build_backbone(name: str) -> nn.Module:
     Works with any model that exposes a top-level `classifier` or `fc`
     attribute (EfficientNet, ResNet, MobileNet, etc.).
     """
-    weights_enum_name = f"{name.replace('_', '').upper()}_DEFAULT"  # best available
     try:
         weights = tv_models.get_model_weights(name).DEFAULT
     except Exception:

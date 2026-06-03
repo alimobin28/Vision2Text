@@ -94,9 +94,9 @@ class CaptionDecoder(nn.Module):
         x = x + self.pos_embed[:, :T, :]            # add positional info
         x = self.dropout(x)
 
-        # causal mask: True at (i, j) means position i must NOT attend to j.
-        # Using bool type so it matches the bool padding mask below.
-        causal_mask = torch.ones(T, T, dtype=torch.bool, device=device).triu(diagonal=1)
+        # causal mask: -inf at (i, j) means position i must NOT attend to j.
+        # Float additive mask is compatible across all PyTorch versions.
+        causal_mask = torch.full((T, T), float("-inf"), device=device).triu(diagonal=1)
 
         # padding mask: True wherever the token is PAD (index 0), so those
         # positions are ignored in self-attention

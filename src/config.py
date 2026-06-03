@@ -12,8 +12,8 @@ class Config(BaseSettings):
 
     # --- dataset ---
     dataset_name: str = "flickr8k"        # "flickr8k" or "flickr30k"
-    data_dir: Path = Path("data/flickr8k")
-    captions_file: str = "captions.txt"   # filename inside data_dir
+    data_dir: Path = Path("src/data")
+    captions_file: str = "captions.txt/captions.txt"   # filename inside data_dir
 
     # --- artefact paths ---
     cache_dir: Path = Path("cache")
@@ -48,7 +48,7 @@ class Config(BaseSettings):
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     warmup_steps: int = 1000
-    max_epochs: int = 30
+    max_epochs: int = 3
 
     # --- training ---
     batch_size: int = 32
