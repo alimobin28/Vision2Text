@@ -9,54 +9,78 @@ from src.config import Config
 
 
 class ImageEncoder(nn.Module):
-    """EfficientNetV2-S → spatial feature map → project to d_model.
+    """CNN trunk -> spatial feature map -> project to d_model.
 
-    Instead of pooling down to a single 1280-d vector, we keep the full 7×7
-    spatial grid so the decoder can cross-attend to individual image regions.
+    Instead of pooling down to a single vector, we keep the full spatial grid
+    (7x7 = 49 patches for EfficientNetV2-S at 224px) so the decoder can
+    cross-attend to individual image regions.
+
+    ``pretrained=None`` follows ``cfg.pretrained_backbone``. The serving path
+    passes ``False``: the checkpoint supplies every weight, so downloading
+    ImageNet weights at startup would only waste time (and fail offline).
     """
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, pretrained: bool | None = None):
         super().__init__()
-        weights = tv_models.EfficientNet_V2_S_Weights.DEFAULT
-        backbone = tv_models.efficientnet_v2_s(weights=weights)
+        if pretrained is None:
+            pretrained = cfg.pretrained_backbone
 
-        # .features is the convolutional trunk; stops before avgpool and classifier
-        self.features = backbone.features          # output: (B, 1280, 7, 7) at 224px
+        backbone = tv_models.get_model(
+            cfg.backbone, weights="DEFAULT" if pretrained else None
+        )
+        if not hasattr(backbone, "features"):
+            raise ValueError(
+                f"Backbone '{cfg.backbone}' has no convolutional `.features` trunk; "
+                "use an EfficientNet/MobileNet/ConvNeXt/RegNet-style model."
+            )
+        # .features stops before pooling and the classifier head
+        self.features = backbone.features
 
-        backbone_out_channels = 1280
-        self.proj = nn.Linear(backbone_out_channels, cfg.d_model)
+        # Probe the trunk once instead of hard-coding 1280 channels / 7x7.
+        was_training = self.features.training
+        self.features.eval()
+        with torch.no_grad():
+            probe = self.features(torch.zeros(1, 3, cfg.image_size, cfg.image_size))
+        self.features.train(was_training)
+        _, channels, h, w = probe.shape
+        self.n_patches = h * w
+        self.grid = (h, w)
 
-        # how many spatial patches the backbone produces at this image size
-        spatial_size = cfg.image_size // 32        # 224 // 32 = 7
-        n_patches = spatial_size * spatial_size    # 49
+        self.proj = nn.Linear(channels, cfg.d_model)
 
         # learnable positional embedding; one vector per spatial location
-        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches, cfg.d_model))
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, cfg.d_model))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, images: Tensor) -> Tensor:
         """images: (B, 3, H, W) -> (B, N_patches, d_model)"""
-        x = self.features(images)                  # (B, 1280, 7, 7)
-        B, C, H, W = x.shape
-        x = x.flatten(2).transpose(1, 2)           # (B, 49, 1280)
-        x = self.proj(x)                           # (B, 49, d_model)
-        x = x + self.pos_embed                     # broadcast positional info
-        return x
+        x = self.features(images)                  # (B, C, h, w)
+        x = x.flatten(2).transpose(1, 2)           # (B, h*w, C)
+        x = self.proj(x)                           # (B, h*w, d_model)
+        return x + self.pos_embed                  # broadcast positional info
 
 
 class CaptionDecoder(nn.Module):
-    """4-layer causal Transformer decoder with cross-attention over image patches.
+    """Causal Transformer decoder with cross-attention over image patches.
 
-    Each generated token attends to all 49 spatial patches — the model learns
-    which patches are relevant for each word rather than getting a single blurred summary.
+    Each generated token attends to all spatial patches — the model learns
+    which patches are relevant for each word rather than getting a single
+    blurred summary.
     """
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, pad_id: int = 0):
         super().__init__()
         self.d_model = cfg.d_model
         self.max_len = cfg.max_caption_len
+        self.pad_id = pad_id
 
-        self.token_embed = nn.Embedding(cfg.vocab_size, cfg.d_model, padding_idx=0)
+        self.token_embed = nn.Embedding(cfg.vocab_size, cfg.d_model, padding_idx=pad_id)
+        # nn.Embedding defaults to N(0, 1). The output projection is tied to this
+        # table, so that scale would put the initial logits at ~sqrt(d_model) and
+        # the starting loss far above ln(vocab_size). Small init, like GPT-2.
+        nn.init.normal_(self.token_embed.weight, mean=0.0, std=0.02)
+        with torch.no_grad():
+            self.token_embed.weight[pad_id].zero_()
 
         # one learnable position per caption slot
         self.pos_embed = nn.Parameter(torch.zeros(1, cfg.max_caption_len, cfg.d_model))
@@ -70,9 +94,13 @@ class CaptionDecoder(nn.Module):
             batch_first=True,   # (B, T, d_model) convention throughout
             norm_first=True,    # pre-norm: more stable for smaller datasets
         )
+        # Pre-norm layers leave the residual stream un-normalised, so the stack
+        # needs a final LayerNorm before the output projection (standard in
+        # pre-LN transformers). Without it the logits' scale is uncontrolled.
         self.decoder = nn.TransformerDecoder(
             decoder_layer,
             num_layers=cfg.num_decoder_layers,
+            norm=nn.LayerNorm(cfg.d_model),
         )
 
         # output projection — weight tied to token_embed to reduce params by ~4M
@@ -98,9 +126,12 @@ class CaptionDecoder(nn.Module):
         # Float additive mask is compatible across all PyTorch versions.
         causal_mask = torch.full((T, T), float("-inf"), device=device).triu(diagonal=1)
 
-        # padding mask: True wherever the token is PAD (index 0), so those
-        # positions are ignored in self-attention
-        pad_mask = token_ids.eq(0)                  # (B, T), True = ignore
+        # padding mask: -inf wherever the token is PAD so those positions are
+        # ignored in self-attention. Same (float) type as the causal mask —
+        # PyTorch deprecates mixing a bool and a float mask.
+        pad_mask = torch.zeros(token_ids.shape, device=device).masked_fill(
+            token_ids.eq(self.pad_id), float("-inf")
+        )                                           # (B, T)
 
         x = self.decoder(
             tgt=x,
@@ -113,17 +144,16 @@ class CaptionDecoder(nn.Module):
 
 
 class ImageCaptioner(nn.Module):
-    """Full encoder-decoder captioning model.
+    """Full encoder-decoder captioning model."""
 
-    Forward accepts pre-encoded spatial features so the encoder can be run
-    once and cached (useful for ablations or frozen-encoder training).
-    The `encode` method is the bridge between raw images and those features.
-    """
-
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, pad_id: int = 0, pretrained: bool | None = None):
         super().__init__()
-        self.encoder = ImageEncoder(cfg)
-        self.decoder = CaptionDecoder(cfg)
+        self.encoder = ImageEncoder(cfg, pretrained=pretrained)
+        self.decoder = CaptionDecoder(cfg, pad_id=pad_id)
+
+    @property
+    def n_patches(self) -> int:
+        return self.encoder.n_patches
 
     def encode(self, images: Tensor) -> Tensor:
         """images: (B, 3, H, W) -> (B, N_patches, d_model)"""
@@ -148,10 +178,11 @@ class ImageCaptioner(nn.Module):
         """Autoregressive greedy decoding — used during validation.
 
         Returns (B, max_len) tensor of generated token IDs.
-        Sequences that produce EOS are padded with zeros from that point on.
+        Sequences that produce EOS are padded with the PAD id from that point on.
         """
         B = image_features.size(0)
         device = image_features.device
+        pad_id = self.decoder.pad_id
 
         tokens = torch.full((B, 1), bos_id, dtype=torch.long, device=device)
         finished = torch.zeros(B, dtype=torch.bool, device=device)
@@ -159,7 +190,7 @@ class ImageCaptioner(nn.Module):
         for _ in range(max_len - 1):
             logits = self.forward(image_features, tokens)   # (B, t, vocab_size)
             next_id = logits[:, -1, :].argmax(dim=-1)       # (B,)
-            next_id = next_id.masked_fill(finished, 0)      # pad finished seqs
+            next_id = next_id.masked_fill(finished, pad_id) # pad finished seqs
             tokens = torch.cat([tokens, next_id.unsqueeze(1)], dim=1)
             finished = finished | next_id.eq(eos_id)
             if finished.all():
@@ -167,7 +198,9 @@ class ImageCaptioner(nn.Module):
 
         # pad to exactly max_len if we exited the loop early
         if tokens.size(1) < max_len:
-            pad = torch.zeros(B, max_len - tokens.size(1), dtype=torch.long, device=device)
+            pad = torch.full(
+                (B, max_len - tokens.size(1)), pad_id, dtype=torch.long, device=device
+            )
             tokens = torch.cat([tokens, pad], dim=1)
 
         return tokens

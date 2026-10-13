@@ -1,0 +1,41 @@
+[project]
+name = "vision2text"
+version = "0.1.0"
+description = "Image captioning (EfficientNetV2-S encoder + Transformer decoder) with a FastAPI backend and an attention-heatmap React UI."
+readme = "README.md"
+# 3.11 is what the Docker image runs; 3.12 is what has been tested locally.
+requires-python = ">=3.11,<3.13"
+
+# Dependencies live in the requirements-*.txt files (Docker installs from them).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # third-party deprecation chatter that we cannot act on
+    "ignore::DeprecationWarning:starlette",
+    "ignore:Using `httpx` with `starlette.testclient`:Warning",
+    "ignore:.*isinstance\\(treespec, LeafSpec\\).*:Warning",
+    "ignore:.*does not have many workers.*:Warning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["frontend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # long lines: the formatter's job, not worth failing CI over
+    "B008",   # FastAPI's File()/Form() defaults are the documented idiom
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+files = ["src", "train.py"]

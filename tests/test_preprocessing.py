@@ -1,4 +1,3 @@
-import pytest
 from src.data.preprocessing import clean_caption, clean_captions
 
 
@@ -66,3 +65,19 @@ def test_clean_captions_batch():
 
 def test_clean_captions_empty_list():
     assert clean_captions([]) == []
+
+
+def test_hyphen_separates_words_instead_of_fusing_them():
+    assert clean_caption("a black-and-white dog") == "a black and white dog"
+
+
+def test_curly_apostrophe_treated_like_straight_one():
+    assert clean_caption("the dog’s toy") == "the dogs toy"
+
+
+def test_unicode_letters_survive():
+    assert clean_caption("Café au lait!") == "café au lait"
+
+
+def test_only_punctuation_and_numbers_becomes_empty():
+    assert clean_caption("12 !!! 34") == ""

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import math
+from typing import Literal
+
+import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-import pytorch_lightning as pl
 from torch.optim import AdamW
-from transformers import get_cosine_schedule_with_warmup
+from torch.optim.lr_scheduler import LambdaLR
 from torchmetrics.text import BLEUScore
 
 from src.config import Config
-from src.data.vocab import BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, load_vocab
+from src.data.vocab import load_vocab, special_ids
 from src.models.captioner import ImageCaptioner
 
 
-def recommended_precision() -> str:
+def recommended_precision() -> Literal["bf16-mixed", "16-mixed", "32"]:
     """Pick the best available mixed-precision mode for this machine."""
     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         return "bf16-mixed"
@@ -21,48 +24,66 @@ def recommended_precision() -> str:
     return "32"
 
 
+def cosine_with_warmup(
+    optimizer: torch.optim.Optimizer, warmup_steps: int, total_steps: int
+) -> LambdaLR:
+    """Linear warm-up to the base LR, then cosine decay to zero."""
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
 class CaptioningModule(pl.LightningModule):
     """Lightning wrapper around ImageCaptioner.
 
     Training uses teacher forcing (fast, stable).
     Validation uses greedy decoding so BLEU-4 reflects what the model actually
-    generates at inference time, not what it generates when fed ground-truth tokens.
+    generates at inference time, not what it generates when fed ground-truth
+    tokens. Each generated caption is scored against ALL of its image's
+    reference captions.
     """
 
     def __init__(self, cfg: Config, steps_per_epoch: int):
         super().__init__()
         self.cfg = cfg
         self.steps_per_epoch = steps_per_epoch
-        self.save_hyperparameters(cfg.model_dump())
-
-        self.model = ImageCaptioner(cfg)
+        # mode="json" turns Paths into strings. Raw pathlib objects pickled into
+        # the checkpoint make it unloadable with torch.load(weights_only=True)
+        # and, if trained on Windows, on any non-Windows machine at all.
+        self.save_hyperparameters(cfg.model_dump(mode="json"))
 
         tokenizer = load_vocab(cfg.vocab_path)
+        if tokenizer.get_vocab_size() > cfg.vocab_size:
+            raise ValueError(
+                f"Tokenizer has {tokenizer.get_vocab_size()} tokens but "
+                f"V2T_VOCAB_SIZE is {cfg.vocab_size}: the embedding table would "
+                "be too small. Rebuild the vocab or raise vocab_size."
+            )
         self._tokenizer = tokenizer
-        self._bos_id = tokenizer.token_to_id(BOS_TOKEN)
-        self._eos_id = tokenizer.token_to_id(EOS_TOKEN)
-        self._pad_id = tokenizer.token_to_id(PAD_TOKEN)
+        self._pad_id, self._bos_id, self._eos_id = special_ids(tokenizer)
+
+        self.model = ImageCaptioner(cfg, pad_id=self._pad_id)
 
         self.criterion = nn.CrossEntropyLoss(
             label_smoothing=cfg.label_smoothing,
             ignore_index=self._pad_id,
         )
 
-        self._bleu4 = BLEUScore(n_gram=4)
-
-        # accumulate during validation_step, score in on_validation_epoch_end
-        self._val_preds: list[str] = []
-        self._val_targets: list[list[str]] = []
+        self.val_bleu4 = BLEUScore(n_gram=4)
 
     # ------------------------------------------------------------------
-    # forward pass helpers
+    # helpers
     # ------------------------------------------------------------------
 
     def _decode_ids_to_text(self, token_ids: torch.Tensor) -> list[str]:
         """Convert a (B, T) int tensor back to a list of caption strings."""
         results = []
         for row in token_ids.tolist():
-            # strip BOS, EOS, PAD
             trimmed = []
             for tok in row:
                 if tok in (self._bos_id, self._pad_id):
@@ -73,6 +94,15 @@ class CaptioningModule(pl.LightningModule):
             results.append(self._tokenizer.decode(trimmed))
         return results
 
+    def on_save_checkpoint(self, checkpoint: dict) -> None:
+        # Make every .ckpt self-describing: the serving side rebuilds the exact
+        # architecture and tokenizer from the file instead of trusting its own
+        # environment variables to match the training run.
+        checkpoint["v2t"] = {
+            "architecture": self.cfg.architecture(),
+            "tokenizer": self._tokenizer.to_str(),
+        }
+
     # ------------------------------------------------------------------
     # training
     # ------------------------------------------------------------------
@@ -80,7 +110,7 @@ class CaptioningModule(pl.LightningModule):
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         images, token_ids = batch                          # (B,3,H,W), (B,T)
 
-        features = self.model.encode(images)               # (B, 49, d_model)
+        features = self.model.encode(images)               # (B, N, d_model)
 
         # teacher forcing: feed all tokens except the last, predict all except the first
         logits = self.model(features, token_ids[:, :-1])   # (B, T-1, vocab_size)
@@ -89,11 +119,14 @@ class CaptioningModule(pl.LightningModule):
         V = logits.size(-1)
         loss = self.criterion(logits.reshape(-1, V), targets.reshape(-1))
 
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log(
+            "train_loss", loss,
+            on_step=True, on_epoch=True, prog_bar=True, batch_size=images.size(0),
+        )
         return loss
 
     def validation_step(self, batch: tuple, batch_idx: int) -> None:
-        images, token_ids = batch
+        images, references = batch        # (B,3,H,W), list[list[str]] (B x n_refs)
 
         features = self.model.encode(images)
         generated = self.model.greedy_decode(
@@ -102,41 +135,50 @@ class CaptioningModule(pl.LightningModule):
             bos_id=self._bos_id,
             eos_id=self._eos_id,
         )
-
         preds = self._decode_ids_to_text(generated)
-        refs = self._decode_ids_to_text(token_ids)
 
-        self._val_preds.extend(preds)
-        # torchmetrics BLEUScore expects List[List[str]] for references
-        self._val_targets.extend([[ref] for ref in refs])
-
-    def on_validation_epoch_end(self) -> None:
-        if not self._val_preds:
-            return
-
-        bleu = self._bleu4(self._val_preds, self._val_targets)
-        self.log("val_bleu4", bleu, prog_bar=True)
-
-        self._val_preds.clear()
-        self._val_targets.clear()
+        # torchmetrics accumulates across the epoch, computes once at the end
+        # and resets itself — Lightning handles that for metric objects.
+        self.val_bleu4.update(preds, references)
+        self.log(
+            "val_bleu4", self.val_bleu4,
+            on_step=False, on_epoch=True, prog_bar=True, batch_size=images.size(0),
+        )
 
     # ------------------------------------------------------------------
     # optimiser + schedule
     # ------------------------------------------------------------------
 
     def configure_optimizers(self):
-        optimizer = AdamW(
-            self.parameters(),
-            lr=self.cfg.learning_rate,
-            weight_decay=self.cfg.weight_decay,
-        )
+        cfg = self.cfg
+        backbone_ids = {id(p) for p in self.model.encoder.features.parameters()}
 
-        total_steps = self.steps_per_epoch * self.cfg.max_epochs
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=self.cfg.warmup_steps,
-            num_training_steps=total_steps,
-        )
+        # 4 groups: {backbone, new layers} x {weight decay, none for biases/norms/embeddings}
+        groups: dict[tuple[bool, bool], list[nn.Parameter]] = {
+            (b, d): [] for b in (True, False) for d in (True, False)
+        }
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            decay = p.ndim > 1 and not name.endswith("pos_embed")
+            groups[(id(p) in backbone_ids, decay)].append(p)
+
+        param_groups = []
+        for (is_backbone, decay), params in groups.items():
+            if not params:
+                continue
+            param_groups.append({
+                "params": params,
+                "lr": cfg.learning_rate * (cfg.backbone_lr_mult if is_backbone else 1.0),
+                "weight_decay": cfg.weight_decay if decay else 0.0,
+            })
+
+        optimizer = AdamW(param_groups)
+
+        total_steps = max(1, self.steps_per_epoch * cfg.max_epochs)
+        # A 1000-step warm-up is longer than an entire smoke run; cap it at 10%.
+        warmup = min(cfg.warmup_steps, max(1, total_steps // 10))
+        scheduler = cosine_with_warmup(optimizer, warmup, total_steps)
 
         return (
             [optimizer],
@@ -146,22 +188,30 @@ class CaptioningModule(pl.LightningModule):
 
 def build_trainer(cfg: Config, steps_per_epoch: int) -> pl.Trainer:
     """Convenience factory that wires up the standard callbacks and precision."""
-    from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+    from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
+    from pytorch_lightning.loggers import CSVLogger
 
     checkpoint_cb = ModelCheckpoint(
         dirpath=str(cfg.output_dir / "checkpoints"),
         monitor="val_bleu4",
         mode="max",
         save_top_k=1,
+        save_last=True,                     # last.ckpt: what `train.py --resume` continues from
         filename="best-{epoch:02d}-{val_bleu4:.4f}",
+        auto_insert_metric_name=False,      # best-03-0.2150.ckpt, not best-epoch=03-...
     )
-
-    lr_monitor = LearningRateMonitor(logging_interval="step")
+    callbacks: list[pl.Callback] = [checkpoint_cb, LearningRateMonitor(logging_interval="step")]
+    if cfg.early_stopping_patience > 0:
+        callbacks.append(
+            EarlyStopping(monitor="val_bleu4", mode="max", patience=cfg.early_stopping_patience)
+        )
 
     return pl.Trainer(
         max_epochs=cfg.max_epochs,
         precision=recommended_precision(),
         gradient_clip_val=1.0,
-        callbacks=[checkpoint_cb, lr_monitor],
+        callbacks=callbacks,
+        logger=CSVLogger(save_dir=str(cfg.output_dir), name="logs"),
+        log_every_n_steps=max(1, min(50, steps_per_epoch)),
         default_root_dir=str(cfg.output_dir),
     )

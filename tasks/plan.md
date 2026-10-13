@@ -1,77 +1,68 @@
-# Vision2Text — Project Scaffold, Config & Data Pipeline
+# Vision2Text — Plan & Status
 
 ## Context
 
-Starting from an empty repo. The original work was a monolithic Kaggle notebook with three
-hard bugs that silently corrupted every downstream experiment:
-
-1. **Silent regex bug** — `str.replace("pattern", "")` does nothing when the "pattern"
-   looks like a regex. Captions were never actually cleaned. Fixed with `re.sub`.
-2. **Hardcoded Kaggle paths** — scattered across ~8 cells. Impossible to re-run elsewhere.
-   Fixed by centralising every path in `src/config.py`.
-3. **Feature extraction repeated every run** — no caching; EfficientNet ran on every notebook
-   restart, wasting GPU time. Fixed with content-addressed `.h5` cache in `src/features/`.
-4. **No structure** — everything in one file, untestable, unreusable.
+Started from a monolithic Kaggle notebook with silent bugs (regex cleaning that did nothing,
+hardcoded paths, repeated feature extraction, no structure). The repo splits it into a tested,
+config-driven pipeline plus a serving stack. The README is the user-facing description; this file
+records the module responsibilities and what remains.
 
 ---
 
-## Directory Layout
+## Directory layout (current)
 
 ```
-Vision2Text/
-├── src/
-│   ├── __init__.py
-│   ├── config.py                  # Pydantic BaseSettings — single source of truth
-│   ├── data/
-│   │   ├── __init__.py
-│   │   ├── dataset.py             # torch Dataset wrapping Flickr captions + image paths
-│   │   ├── preprocessing.py       # re.sub-based caption cleaning pipeline
-│   │   └── vocab.py               # BPE tokenizer (HuggingFace tokenizers); saves vocab.json
-│   └── features/
-│       ├── __init__.py
-│       └── extractor.py           # Pluggable CNN backbone; content-addressed .h5 cache
-├── tests/
-│   ├── __init__.py
-│   ├── test_preprocessing.py
-│   └── test_vocab.py
-├── tasks/
-│   ├── plan.md                    # this file
-│   └── lessons.md
-├── requirements.txt
-└── .gitignore
+src/
+  config.py            Pydantic BaseSettings — every path & hyperparameter
+  data/
+    preprocessing.py   clean_caption / clean_captions  (compiled re patterns)
+    vocab.py           BPE (HF tokenizers): build_vocab, load_vocab, encode, special_ids, group_pieces
+    dataset.py         parse_captions, split_image_names, load_splits, FlickrDataset (pairs),
+                       FlickrEvalDataset (image + all references), get_dataloader
+    transforms.py      build_transform — shared by training and serving
+    download.py        Flickr8k via kagglehub
+    toy.py             synthetic dataset for tests / smoke runs
+  models/captioner.py  ImageEncoder (probed patch grid), CaptionDecoder (pre-norm + final LN, tied embeddings),
+                       ImageCaptioner, greedy_decode
+  training/
+    trainer.py         CaptioningModule (teacher forcing; greedy-decode BLEU-4 vs all references),
+                       build_trainer (checkpoint, early stopping, CSV logs)
+    export.py          Lightning .ckpt -> self-contained model.pt
+  inference/engine.py  InferenceEngine: beam search, thread-safe attention capture, word grouping
+  evaluation/          metrics.py (BLEU, ROUGE-L, CIDEr-D, METEOR), evaluate.py (CLI)
+  api/                 FastAPI app + schemas
+frontend/              React + Vite + TS (Vitest, ESLint)
+tests/                 data, model, engine, API, metrics, pipeline (train -> export -> serve -> evaluate -> resume)
+train.py               training entry point (--resume, --rebuild-vocab)
 ```
 
 ---
 
-## Module Responsibilities
+## Status
 
-### `src/config.py`
-Single `Config(BaseSettings)` class. Every hyperparameter, path, and seed lives here.
-Override any value via `.env` file or environment variable — no code changes needed.
+Done and verified (tests / runs on the authoring machine):
+- data pipeline on real Flickr8k (8,091 images, 5 captions each, 6473/809/809 split, no overlap)
+- training loop, validation BLEU, checkpointing, export, resume (synthetic data + 200 real images)
+- API served live from an exported model, real image through HTTP, error paths, metrics
+- 111 backend tests, ruff, mypy; 30 frontend tests, typecheck, lint, production build, `npm ci`
 
-### `src/data/preprocessing.py`
-`clean_caption(text)` pipeline using compiled `re.compile` patterns:
-- Lowercase → strip possessives → remove punctuation → drop pure numbers → collapse whitespace
+Written but **not executed** anywhere yet:
+- Dockerfiles / docker-compose / nginx.conf (no Docker on the authoring machine) — CI builds the images
+- GitHub Actions workflow
+- Flickr30k parsing against the real dataset (tested on synthetic files only)
+- visual check of the UI changes in a browser (logic is unit-tested, pixels were not eyeballed)
 
-### `src/data/vocab.py`
-BPE tokenizer trained from scratch on cleaned captions via `tokenizers` library.
-Saves to `vocab.json`; exposes `build_vocab`, `load_vocab`, `encode`.
+## Remaining (needs the owner)
 
-### `src/data/dataset.py`
-`FlickrDataset` — torch Dataset over Flickr8k/30k. Cleans captions on load,
-returns `(image_tensor, caption_ids_tensor)` pairs.
+1. **Full training run on a GPU** and recording the metrics in the README "Results" section.
+   CPU is ~55 min/epoch, so a real run on CPU is impractical.
+2. **Decide where trained models live** (GitHub Release / Hugging Face Hub / DVC). `model.pt` is a single file,
+   ~170 MB for the default size.
+3. **Choose a LICENSE.**
+4. Run the Docker stack once (`docker compose up --build`) and confirm CI is green.
 
-### `src/features/extractor.py`
-`extract_features(cfg, dataset)` — checks for a cached `.h5` file keyed by
-`md5(backbone + image_size + data_dir)`. Skips extraction if cache exists.
-
----
-
-## Verification
-
-```bash
-pip install -r requirements.txt
-pytest tests/ -v
-python -c "from src.config import cfg; print(cfg.model_dump())"
-python -c "from src.data.preprocessing import clean_caption; print(clean_caption(\"Dog's running!!!\"))"
-```
+## Possible later improvements
+- KV-cache for beam search; higher input resolution (EfficientNetV2-S was tuned for 384); EMA of weights
+- frozen-encoder mode with a cached spatial-feature file for fast ablations
+- official METEOR 1.5 / SPICE via `pycocoevalcap` if published-table comparability matters
+- dependency lock file (`uv`/`pip-tools`)

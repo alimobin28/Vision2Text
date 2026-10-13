@@ -26,8 +26,12 @@ env/
 # Data, caches, and large binary artifacts
 # These are too big for git — store them outside the repo or
 # use DVC / cloud storage.
+#
+# NOTE: "/data/" is anchored to the repo root on purpose. An unanchored
+# "data/" also matched the source package src/data/, which silently kept
+# dataset.py / vocab.py / preprocessing.py out of every commit.
 # ============================================================
-data/
+/data/
 cache/
 *.h5
 *.hdf5

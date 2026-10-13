@@ -1,15 +1,19 @@
 import json
-import pytest
 from pathlib import Path
+
+import pytest
 
 from src.data.vocab import (
     BOS_TOKEN,
     EOS_TOKEN,
     PAD_TOKEN,
     UNK_TOKEN,
+    WORD_END,
     build_vocab,
     encode,
+    group_pieces,
     load_vocab,
+    special_ids,
 )
 
 _CORPUS = [
@@ -95,3 +99,54 @@ def test_unknown_token_handled(tokenizer):
 def test_load_vocab_missing_file():
     with pytest.raises(FileNotFoundError, match="Vocabulary not found"):
         load_vocab(Path("/nonexistent/vocab.json"))
+
+
+def test_pad_token_is_id_zero(tokenizer):
+    # The decoder's padding_idx and padding mask rely on this.
+    assert tokenizer.token_to_id(PAD_TOKEN) == 0
+
+
+def test_decode_round_trips_to_spaced_words(tokenizer):
+    ids = tokenizer.encode("a dog runs in the park").ids
+    assert tokenizer.decode(ids) == "a dog runs in the park"
+
+
+def test_decode_skips_special_tokens(tokenizer):
+    ids = encode(tokenizer, "a dog", max_len=10)
+    assert tokenizer.decode(ids) == "a dog"
+
+
+def test_build_vocab_creates_parent_directory(tmp_path):
+    path = tmp_path / "deep" / "er" / "vocab.json"
+    build_vocab(_CORPUS, vocab_size=100, save_path=path)
+    assert path.exists()
+
+
+def test_special_ids_returns_pad_bos_eos(tokenizer):
+    pad, bos, eos = special_ids(tokenizer)
+    assert (pad, bos, eos) == tuple(
+        tokenizer.token_to_id(t) for t in (PAD_TOKEN, BOS_TOKEN, EOS_TOKEN)
+    )
+
+
+def test_special_ids_rejects_a_vocab_without_special_tokens():
+    from tokenizers import Tokenizer, models
+    bare = Tokenizer(models.WordLevel({"a": 0, "[UNK]": 1}, unk_token="[UNK]"))
+    with pytest.raises(ValueError, match="no '<pad>' token"):
+        special_ids(bare)
+
+
+def test_encode_needs_room_for_bos_and_eos(tokenizer):
+    with pytest.raises(ValueError):
+        encode(tokenizer, "dog", max_len=1)
+
+
+def test_group_pieces_merges_subwords():
+    pieces = ["a" + WORD_END, "runn", "ing" + WORD_END, "dog" + WORD_END]
+    assert group_pieces(pieces) == [("a", [0]), ("running", [1, 2]), ("dog", [3])]
+
+
+def test_group_pieces_handles_truncated_word_and_unk():
+    assert group_pieces(["ru", "nn"]) == [("runn", [0, 1])]
+    assert group_pieces([UNK_TOKEN, "x" + WORD_END]) == [("?x", [0, 1])]
+    assert group_pieces([]) == []

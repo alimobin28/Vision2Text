@@ -1,0 +1,31 @@
+# Keep the build context small: the repo root is the context for both images.
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Large / local artifacts — mounted at runtime, never baked in
+data
+cache
+outputs
+checkpoints
+lightning_logs
+*.ckpt
+*.pt
+*.pth
+.env
+.env.*
+
+# Frontend: installed and built inside the image
+frontend/node_modules
+frontend/dist
+
+# Not needed to run the service
+tests
+tasks
+*.md

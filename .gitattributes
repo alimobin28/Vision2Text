@@ -1,0 +1,13 @@
+# Normalise line endings on commit. Files that Linux tooling parses strictly are
+# pinned to LF even in a Windows checkout (core.autocrlf=true would otherwise
+# give them CRLF, which breaks `make` recipes and shell lines in Dockerfiles).
+* text=auto
+
+Makefile          text eol=lf
+Dockerfile*       text eol=lf
+*.Dockerfile      text eol=lf
+nginx.conf        text eol=lf
+*.sh              text eol=lf
+*.yml             text eol=lf
+.dockerignore     text eol=lf
+.python-version   text eol=lf

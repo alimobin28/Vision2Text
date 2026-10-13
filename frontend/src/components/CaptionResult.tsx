@@ -20,9 +20,24 @@ interface Props {
 export default function CaptionResult({ imageUrl, result }: Props): JSX.Element {
   const imgRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [activeIdx, setActiveIdx] = useState<number | null>(null);
+
+  // Two ways to select a word:
+  //   • hover / keyboard focus  → temporary preview (mouse and keyboard users)
+  //   • click / tap / Enter     → "pinned", stays until toggled off (touch users,
+  //                               who have no hover)
+  // A hovered word wins over the pinned one while the pointer is on it.
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [pinnedIdx, setPinnedIdx] = useState<number | null>(null);
+  const activeIdx = hoverIdx ?? pinnedIdx;
+
   // Rendered dimensions of the <img> element (CSS pixels, not natural size).
   const [imgDims, setImgDims] = useState({ w: 0, h: 0 });
+
+  // A new result starts with nothing selected.
+  useEffect(() => {
+    setHoverIdx(null);
+    setPinnedIdx(null);
+  }, [result]);
 
   // Track image dimensions via ResizeObserver so the canvas stays in sync
   // even when the viewport is resized.
@@ -55,7 +70,7 @@ export default function CaptionResult({ imageUrl, result }: Props): JSX.Element 
     if (!canvas || imgDims.w === 0 || imgDims.h === 0) return;
 
     // Resize the canvas to match the image (this also clears it).
-    canvas.width  = imgDims.w;
+    canvas.width = imgDims.w;
     canvas.height = imgDims.h;
 
     if (activeIdx === null) return;
@@ -66,28 +81,31 @@ export default function CaptionResult({ imageUrl, result }: Props): JSX.Element 
     renderAttentionHeatmap(canvas, weights);
   }, [activeIdx, imgDims, result.attention_weights]);
 
-  // Clear the canvas when activeIdx goes to null (mouse left all tokens).
+  // Clear the canvas when nothing is selected any more.
   useEffect(() => {
     if (activeIdx === null && canvasRef.current) {
       clearCanvas(canvasRef.current);
     }
   }, [activeIdx]);
 
-  const activate = useCallback((idx: number): void => setActiveIdx(idx), []);
-  const deactivate = useCallback((): void => setActiveIdx(null), []);
-
-  const handleTokenKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLButtonElement>, idx: number): void => {
-      // Enter/Space toggle the selection; Escape dismisses.
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        setActiveIdx((prev) => (prev === idx ? null : idx));
-      } else if (e.key === 'Escape') {
-        setActiveIdx(null);
+  const handleClick = useCallback((idx: number): void => {
+    setPinnedIdx((prev) => {
+      if (prev === idx) {
+        // unpinning: also drop the hover so a tap on touch screens really clears it
+        setHoverIdx(null);
+        return null;
       }
-    },
-    [],
-  );
+      return idx;
+    });
+  }, []);
+
+  const handleKeyDown = useCallback((e: KeyboardEvent<HTMLButtonElement>): void => {
+    // Enter/Space already fire click (→ pin) natively; Escape dismisses everything.
+    if (e.key === 'Escape') {
+      setHoverIdx(null);
+      setPinnedIdx(null);
+    }
+  }, []);
 
   // Compute aria description for the currently active token.
   const activeWeights =
@@ -100,7 +118,7 @@ export default function CaptionResult({ imageUrl, result }: Props): JSX.Element 
   const canvasAriaLabel =
     activeIdx !== null && regionDescription !== null
       ? `Attention heatmap for "${result.tokens[activeIdx]}": model focused on the ${regionDescription} region`
-      : 'No token selected — hover or focus a word below to see the attention heatmap';
+      : 'No word selected — hover, focus or tap a word below to see the attention heatmap';
 
   return (
     <section className="result" aria-label="Caption result">
@@ -140,10 +158,11 @@ export default function CaptionResult({ imageUrl, result }: Props): JSX.Element 
         {result.caption}
       </p>
 
-      {/* Token buttons — hover or focus to see that word's attention map */}
+      {/* Word buttons — preview on hover/focus, pin on click/tap/Enter */}
       <div>
         <p className="result__tokens-label" id="tokens-hint">
-          Hover or focus a word to highlight which image regions drove it.
+          Hover or focus a word to preview which image regions drove it; click or
+          tap to keep it selected.
         </p>
         <div
           className="result__tokens"
@@ -152,27 +171,27 @@ export default function CaptionResult({ imageUrl, result }: Props): JSX.Element 
         >
           {result.tokens.map((token, idx) => {
             const isActive = activeIdx === idx;
+            const isPinned = pinnedIdx === idx;
             const localRegion =
               isActive && regionDescription !== null ? regionDescription : null;
 
             return (
               <button
                 key={idx}
-                className={[
-                  'token-btn',
-                  isActive ? 'token-btn--active' : '',
-                ].join(' ')}
-                aria-pressed={isActive}
+                type="button"
+                className={['token-btn', isActive ? 'token-btn--active' : ''].join(' ')}
+                aria-pressed={isPinned}
                 aria-label={
                   localRegion !== null
                     ? `${token} — attended to ${localRegion} region`
                     : token
                 }
-                onMouseEnter={() => activate(idx)}
-                onMouseLeave={deactivate}
-                onFocus={() => activate(idx)}
-                onBlur={deactivate}
-                onKeyDown={(e) => handleTokenKeyDown(e, idx)}
+                onMouseEnter={() => setHoverIdx(idx)}
+                onMouseLeave={() => setHoverIdx(null)}
+                onFocus={() => setHoverIdx(idx)}
+                onBlur={() => setHoverIdx(null)}
+                onClick={() => handleClick(idx)}
+                onKeyDown={handleKeyDown}
               >
                 {token}
               </button>
@@ -192,7 +211,7 @@ export default function CaptionResult({ imageUrl, result }: Props): JSX.Element 
           <dd style={{ display: 'inline' }}>{result.beam_size}</dd>
         </span>
         <span>
-          <dt style={{ display: 'inline' }}>Tokens</dt>{' '}
+          <dt style={{ display: 'inline' }}>Words</dt>{' '}
           <dd style={{ display: 'inline' }}>{result.tokens.length}</dd>
         </span>
       </dl>

@@ -15,6 +15,9 @@ interface Props {
 
 const ACCEPTED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_BYTES = 10 * 1024 * 1024;
+// The API accepts 1–16; these are the useful range. Wider beams are slower.
+const BEAM_OPTIONS = [1, 2, 3, 4, 5, 8] as const;
+const DEFAULT_BEAM = 4;
 
 export default function ImageUploader({ onResult }: Props): JSX.Element {
   const [file, setFile] = useState<File | null>(null);
@@ -24,6 +27,7 @@ export default function ImageUploader({ onResult }: Props): JSX.Element {
   // 0..1 while bytes are uploading; null once upload is done (server processing)
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [beamSize, setBeamSize] = useState<number>(DEFAULT_BEAM);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -82,7 +86,7 @@ export default function ImageUploader({ onResult }: Props): JSX.Element {
     try {
       const result = await captionImage(
         file,
-        4,
+        beamSize,
         (p) => {
           setProgress(p);
           // Once the bytes are fully uploaded, switch to the indeterminate state
@@ -204,6 +208,23 @@ export default function ImageUploader({ onResult }: Props): JSX.Element {
         <span className="uploader-footer__filename" aria-live="polite">
           {file !== null ? file.name : 'No file selected'}
         </span>
+        <label
+          className="beam-select"
+          title="Higher values search more candidate captions: usually slightly better, but slower."
+        >
+          Beam size
+          <select
+            value={beamSize}
+            onChange={(e) => setBeamSize(Number(e.target.value))}
+            disabled={uploading}
+          >
+            {BEAM_OPTIONS.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
         <button
           className="btn btn--primary"
           disabled={!isReady}

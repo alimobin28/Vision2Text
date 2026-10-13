@@ -1,35 +1,36 @@
-version: "3.9"
-
 # ---------------------------------------------------------------------------
 # How to run:
-#   1. Put your trained checkpoint at  ./checkpoints/best.ckpt
-#   2. Put your vocab file at          ./cache/vocab.json
-#   3. docker compose up --build
+#   1. Train (python train.py) -> it writes outputs/model.pt, a single file
+#      containing the weights, architecture and tokenizer.
+#   2. mkdir -p checkpoints && cp outputs/model.pt checkpoints/model.pt
+#   3. docker compose up --build         ->  http://localhost
 #
-# Curl smoke-test once the stack is up:
+# Smoke-test once the stack is up:
+#   curl http://localhost/health
 #   curl -X POST http://localhost/caption \
-#        -F "file=@/path/to/your/image.jpg" \
-#        -F "beam_size=4"
+#        -F "file=@/path/to/your/image.jpg" -F "beam_size=4"
+#
+# GPU host:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 # ---------------------------------------------------------------------------
 
 services:
 
-  # ---- FastAPI inference service ----------------------------------------
+  # ---- FastAPI inference service (internal; reachable only through nginx) ----
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    # Model weights and vocab live outside the image — mount them read-only
-    # so you can swap checkpoints without rebuilding.
+    # The model lives outside the image — mount it read-only so you can swap
+    # checkpoints without rebuilding.
     volumes:
       - ./checkpoints:/app/checkpoints:ro
-      - ./cache:/app/cache:ro
     environment:
-      V2T_CHECKPOINT: checkpoints/best.ckpt
-      V2T_VOCAB_PATH: cache/vocab.json
-      V2T_DEVICE: cpu          # change to "cuda" if the host has a GPU
-      V2T_WORKERS: "2"         # ThreadPoolExecutor slots for beam search
-    # Docker won't mark this service healthy until /health returns 200
+      V2T_CHECKPOINT: checkpoints/model.pt
+      V2T_DEVICE: cpu          # "cuda" with docker-compose.gpu.yml
+      V2T_WORKERS: "2"         # inference threads
+    expose:
+      - "8000"
+    # Healthy only once /health returns 200, i.e. the model has loaded.
     healthcheck:
       test:
         - CMD
@@ -42,15 +43,19 @@ services:
       retries: 3
     restart: unless-stopped
 
-  # ---- Nginx reverse proxy -----------------------------------------------
-  nginx:
-    image: nginx:1.27-alpine
+  # ---- Nginx: serves the React build + proxies /caption and /health ----------
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
     ports:
       - "80:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    # Only start nginx after the API is actually healthy
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped

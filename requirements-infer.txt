@@ -1,0 +1,11 @@
+# Everything needed to SERVE a trained model (this is what the Docker image installs).
+# Install torch/torchvision first from the CPU index if you do not need CUDA:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+torchvision>=0.17
+pydantic-settings>=2.0
+tokenizers>=0.15
+Pillow>=10.0
+fastapi>=0.111
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9

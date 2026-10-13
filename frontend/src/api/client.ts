@@ -69,6 +69,24 @@ export function captionImage(
   });
 }
 
+/** What the UI knows about the caption service. */
+export type BackendStatus = 'checking' | 'ready' | 'loading' | 'down';
+
+/**
+ * GET /health. `ready` = model loaded, `loading` = server up but the API
+ * answered 503 (model still loading), `down` = unreachable / unexpected error.
+ */
+export async function checkBackend(signal?: AbortSignal): Promise<BackendStatus> {
+  try {
+    const res = await fetch('/health', { signal });
+    if (res.ok) return 'ready';
+    return res.status === 503 ? 'loading' : 'down';
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') throw err;
+    return 'down';
+  }
+}
+
 function parseJson(text: string): unknown {
   try {
     return JSON.parse(text) as unknown;
